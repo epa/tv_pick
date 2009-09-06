@@ -5,21 +5,8 @@ use File::Slurp;
 use Date::Manip;
 use Glib qw<TRUE FALSE>;
 use Gtk2 '-init';
+use Log::TraceMessages qw(t d); Log::TraceMessages::check_argv();
 use XMLTV qw<best_name write_data>;
-
-# Use Log::TraceMessages if installed.
-BEGIN {
-    eval { require Log::TraceMessages };
-    if ($@) {
-	*t = sub {};
-	*d = sub { '' };
-    }
-    else {
-	*t = \&Log::TraceMessages::t;
-	*d = \&Log::TraceMessages::d;
-	Log::TraceMessages::check_argv();
-    }
-}
 
 # Use Lingua::EN::Numbers::Ordinate if possible, else homebrew.
 sub my_ordinate {
@@ -56,16 +43,6 @@ else {
 sub delete_event {
     Gtk2->main_quit;
     return FALSE;
-}
-
-sub show_file_selection {
-    my ($desc, $callback) = @_;
-    my $fsel = new Gtk2::FileSelection("Open $desc file");
-    my $got;
-    $fsel->ok_button->signal_connect('clicked',
-				     sub { $callback->($fsel->get_filename) && destroy $fsel });
-    $fsel->cancel_button->signal_connect('clicked', sub { destroy $fsel });
-    show $fsel;
 }
 
 # Create a new window
@@ -166,6 +143,7 @@ my ($listings_data, $prefs_data);
 
 sub get_pref {
     my $p = shift;
+    die if not defined $p;
     my $title = get_title $p;
     return $prefs_data->{$title};
 }
@@ -199,19 +177,20 @@ sub keep_same_title_together {
 
 my @buttons;
 my @labels;
+my @programmes_shown_in_table;
 our $doing_magic = 0;
 sub populate_window {
     return if not $listings_data;
     return if not $prefs_data;
 
     my $encoding = $listings_data->[0];
-    my @programmes
+    @programmes_shown_in_table
       = keep_same_title_together
 	grep { not exclude_programme $_ }
 	  @{$listings_data->[3]};
 
     my $num_desc_cols = 2;
-    my $num_rows = scalar @programmes;
+    my $num_rows = scalar @programmes_shown_in_table;
     my $num_cols = $num_desc_cols + scalar @choices;
     my $table = Gtk2::Table->new($num_rows, $num_cols);
     $scrolled_window->add_with_viewport($table);
@@ -220,7 +199,7 @@ sub populate_window {
     my %first_programme_with_title;
     my %buttons_for_title;
     foreach my $row (0 .. $num_rows - 1) {
-	my $programme = $programmes[$row];
+	my $programme = $programmes_shown_in_table[$row];
 	my $title = get_title $programme;
 	for ($first_programme_with_title{$title}) {
 	    $_ = $programme if not defined;
@@ -359,30 +338,55 @@ sub unify_prefs {
     die;
 }
 
+sub get_filename {
+    my ($action, $desc, $callback) = @_;
+    die "bad action '$action'" if $action ne 'open' and $action ne 'save';
+    my $chooser = new Gtk2::FileChooserDialog(ucfirst($action) . " $desc file",
+					      $window,
+					      'GTK_FILE_CHOOSER_ACTION_' . uc($action),
+					      'gtk-cancel' => 'GTK_RESPONSE_CANCEL',
+					      "gtk-$action" => 'GTK_RESPONSE_OK');
+    my $result = run $chooser;
+    t 'chooser gave result: ' . d $result;
+    my $filename;
+    $filename = $chooser->get_filename if $result eq 'ok';
+    destroy $chooser;
+    t 'returning filename: ' . d $filename;
+    return $filename;
+}
+
+sub eval_with_message {
+    my ($code, $desc) = @_;
+    my $ok = eval {
+	t 'running code inside eval block';
+	$code->();
+	t 'code completed';
+	1;
+    };
+    return 1 if $ok;
+    t 'eval failed';
+
+    my $err = $@ // 'unknown error';
+    die $err if not defined $window;
+    my $dialog = new Gtk2::MessageDialog($window,
+					 'destroy-with-parent',
+					 'error',
+					 'cancel',
+					 "$desc: $err");
+    $dialog->$_ for qw(show run destroy);
+    return 0;
+}
+
 sub show_load_dialog {
     my ($file_desc, $parser, $dest_ref) = @_;
-    show_file_selection ucfirst($file_desc), sub {
-	my $file = shift;
-	my $got;
-	eval {
-	    $got = $parser->($file);
-	};
-	my $err = $@;
-	if ($err) {
-	    die if not defined $window;
-	    my $dialog = new Gtk2::MessageDialog($window,
-						 'destroy-with-parent',
-						 'error',
-						 'cancel',
-			       "Failed to load $file_desc file: $err");
-	    $dialog->$_ for qw(show run destroy);
-	    return 0;
-	}
-	# Otherwise okay.
-	$$dest_ref = $got;
-	populate_window;
-	return 1;
-    };
+    my $file = get_filename 'open', ucfirst($file_desc);
+    return if not defined $file;
+    my $got;
+    my $ok = eval_with_message sub { $got = $parser->($file) }, "Loading $file_desc file";
+    return 0 if not $ok;
+    $$dest_ref = $got;
+    populate_window;
+    return 1;
 }
 
 my $hbox;
@@ -404,27 +408,123 @@ sub add_load_button {
 add_load_button 'listings', \&XMLTV::parsefile, \$listings_data;
 add_load_button 'preferences', \&parse_prefs_file, \$prefs_data;
 
-sub set_event {
-    foreach my $row_num (0 .. $#buttons) {
-	my @row = @{$buttons[$row_num]};
-	die if @row != @choices;
-	my @active = grep { $row[$_]->get_active } 0 .. $#row;
-	die if @active != 1;
-	print "row $row_num: active $active[0]\n";
+sub find_active_choice {
+    my $row_num = shift;
+    my @row = @{$buttons[$row_num]};
+    die if @row != @choices;
+    my @active = grep { $row[$_] && $row[$_]->get_active } 0 .. $#row;
+    die if @active != 1;
+    return $choices[$active[0]];
+}
+
+sub save_listings_event {
+    my $filename = get_filename 'save', 'New listings';
+
+    my @all_programmes = @{$listings_data->[3]};
+    my %is_in_table;
+    $is_in_table{$_}++ && die foreach @programmes_shown_in_table;
+    my @programmes_not_in_table = grep { not $is_in_table{$_} } @all_programmes;
+    my %to_write;
+
+    die if @programmes_shown_in_table != @buttons;
+    foreach my $i (0 .. $#programmes_shown_in_table) {
+	my $p = $programmes_shown_in_table[$i];
+	die if exists $to_write{$p};
+	my $a = find_active_choice $i;
+	if ($a eq 'never' or $a eq 'no') {
+	    $to_write{$p} = 0;
+	}
+	elsif ($a eq 'yes' or $a eq 'always') {
+	    $to_write{$p} = 1;
+	}
+	else { die }
     }
+
+    foreach my $p (@programmes_not_in_table) {
+	my $pref = get_pref $p;
+	die if not defined $pref;
+	if ($pref eq 'never') {
+	    $to_write{$p} = 0;
+	}
+	elsif ($pref eq 'always') {
+	    $to_write{$p} = 1;
+	}
+	else {
+	    die 'not shown in table, so should be always or never';
+	}
+    }
+
+    die if keys %to_write != @all_programmes;
+    my @new_data = @$listings_data;
+    $new_data[3] = [ grep { $to_write{$_} } @all_programmes ];
+
+    my $ok = eval_with_message sub {
+	my $f = new IO::File ">$filename";
+	die "cannot write $filename: $!" if not $f;
+	XMLTV::write_data(\@new_data, OUTPUT => $f);
+    }, 'Writing new listings file';
+    return $ok;
+}
+
+sub save_preferences_event {
+    # First update $prefs_data based on the current buttons.  We look
+    # only at the first occurrence of each title to see if it is
+    # 'never' or 'always'.
+    #
+    die if @programmes_shown_in_table != @buttons;
+    my %seen_title;
+    foreach my $i (0 .. $#programmes_shown_in_table) {
+	my $p = $programmes_shown_in_table[$i];
+	my $title = get_title $p;
+	$seen_title{$title}++ && next;
+	my $a = find_active_choice $i;
+	if ($a eq 'never' or $a eq 'always') {
+	    $prefs_data->{$title} = $a;
+	}
+    }
+
+    # Now we can write it.
+    my $filename = get_filename 'save', 'New preferences';
+    return if not defined $filename;
+    my $ok = eval_with_message sub {
+	open my $fh, '>', $filename or die "cannot write $filename: $!";
+	print $fh <<END
+# 'prefs' file
+#
+# This file contains stored preferences for programme titles, so that
+# the user need never be bothered about these shows again.  It's like
+# a killfile.  But as well as saying you 'never' want to watch 'That's
+# Esther', you can have a preference of 'always' watching some
+# programmes, without being asked.
+#
+# A 'yes' or 'no' preference will change the default choice, but the
+# user will be asked again to check.
+#
+# Generated by $0.
+#
+
+END
+	  or die $!;
+	foreach (sort keys %$prefs_data) {
+	    my $pref = $prefs_data->{$_};
+	    print $fh "$pref: $_\n" or die $!;
+	}
+	close $fh or die $!;
+    }, 'Writing new preferences file';
+    return $ok;
 }
 
 $hbox = new Gtk2::HBox;
 $vbox->add($hbox);
 show $hbox;
 
-my $button = new Gtk2::Button('Set');
-$button->signal_connect(clicked => \&set_event);
+my $button = new Gtk2::Button('Save to-watch listings');
+$button->signal_connect(clicked => \&save_listings_event);
 $hbox->add($button);
 show $button;
 
-$button = new Gtk2::Button('Cancel');
-$button->signal_connect(clicked => \&delete_event);
+$button = new Gtk2::Button('Save updated preferences');
+$button->signal_connect(clicked => \&save_preferences_event);
 $hbox->add($button);
 show $button;
 
