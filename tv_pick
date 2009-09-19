@@ -3,6 +3,7 @@ use warnings;
 use strict;
 use File::Slurp;
 use Date::Manip;
+use HTML::Entities;
 use Glib qw<TRUE FALSE>;
 use Gtk2 '-init';
 use Log::TraceMessages qw(t d); Log::TraceMessages::check_argv();
@@ -128,15 +129,26 @@ sub get_full_details {
 	
     my $clump = clumpidx_to_english($h{clumpidx});
 
-    return join('. ', grep { defined }
-		$title,
-		$date,
-		$category,
-		$sub_title,
-		$desc,
-		$credits,
-		$clump,
-	       );
+    my @stuff = ([ $title, 'b' ],
+		 [ $date ],
+		 [ $category ],
+		 [ $sub_title, 'i' ],
+		 [ $desc ],
+		 [ $credits, 'i' ],
+		 [ $clump ],
+	);
+    my @bits;
+    foreach (@stuff) {
+	my ($text, $style) = @$_;
+	next if not defined $text;
+	$text = encode_entities($text, '<>&"');
+	if (defined $style) {
+	    die "bad style $style" if $style !~ /\A[a-z]+\z/;
+	    $text = "<$style>$text</$style>";
+	}
+	push @bits, $text;
+    }
+    return join('. ', @bits);
 }
 
 my ($listings_data, $prefs_data);
@@ -207,7 +219,8 @@ sub populate_window {
 	my $skip_always_and_never
 	  = $programme ne $first_programme_with_title{$title};
 
-	my $label = new Gtk2::Label(get_full_details $programme);
+	my $label = new Gtk2::Label();
+	$label->set_markup(get_full_details $programme);
 	$label->set_justify('left');
 	$label->set_line_wrap(TRUE);
 	$label->set(xalign => 0);
