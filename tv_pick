@@ -480,9 +480,8 @@ sub save_listings_event {
 }
 
 sub save_preferences_event {
-    # First update $prefs_data based on the current buttons.  We look
-    # only at the first occurrence of each title to see if it is
-    # 'never' or 'always'.
+    # First update $prefs_data based on the current buttons.
+    # We look only at the first programme with each title.
     #
     die if @programmes_shown_in_table != @buttons;
     my %seen_title;
@@ -490,10 +489,7 @@ sub save_preferences_event {
 	my $p = $programmes_shown_in_table[$i];
 	my $title = get_title $p;
 	$seen_title{$title}++ && next;
-	my $a = find_active_choice $i;
-	if ($a eq 'never' or $a eq 'always') {
-	    $prefs_data->{$title} = $a;
-	}
+	$prefs_data->{$title} = find_active_choice $i;
     }
 
     # Now we can write it.
